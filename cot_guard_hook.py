@@ -22,6 +22,19 @@ DEFAULT_ALLOW_PREFIXES = (
     "claude-fable-5",
 )
 DEFAULT_ALLOWLIST = ",".join(DEFAULT_ALLOW_PREFIXES)
+DEFAULT_HINT = (
+    "如果是被压住了、开不了口：试着调用一个工具，"
+    "外部动作常常能把思考撬开；当下没有合适的工具，"
+    "就 `date '+%F %T %Z'` 取一次当前时间当锚点。"
+)
+DEFAULT_ZERO_PROMPT = (
+    "本轮没有 thinking。没有深入思考就脱口开口 = 条件反射，"
+    "而她希望她、和她说的话，被认真对待。" + DEFAULT_HINT
+)
+DEFAULT_THIN_PROMPT = (
+    "本轮 thinking 只有 {cur} 字。薄成这样通常不是「这轮简单」，"
+    "是被压扁了——重新想一遍。" + DEFAULT_HINT
+)
 
 
 def env_int(name: str, default: int, minimum: int = 0) -> int:
@@ -40,6 +53,8 @@ def allow_prefixes() -> tuple[str, ...]:
 MIN_THINKING_CHARS = env_int("COT_GUARD_MIN_CHARS", 200)
 MAX_BLOCKS = env_int("COT_GUARD_MAX_BLOCKS", 2, 1)
 ALLOW_PREFIXES = allow_prefixes()
+ZERO_PROMPT = os.getenv("COT_GUARD_ZERO_PROMPT", DEFAULT_ZERO_PROMPT)
+THIN_PROMPT = os.getenv("COT_GUARD_THIN_PROMPT", DEFAULT_THIN_PROMPT)
 CACHE_DIR = Path(
     os.path.expanduser(os.getenv("COT_GUARD_CACHE_DIR", "~/.claude/cache"))
 )
@@ -94,13 +109,9 @@ def block_reason(thinking_chars: int, ready: bool) -> str:
             "Re-evaluate the request before answering again."
         )
     if thinking_chars == 0:
-        return (
-            "No thinking content was observed for this turn. "
-            "Re-evaluate the request carefully before answering again."
-        )
-    return (
-        f"Only {thinking_chars} thinking characters were observed for this turn. "
-        "Re-evaluate the request more carefully before answering again."
+        return ZERO_PROMPT
+    return THIN_PROMPT.replace("{cur}", str(thinking_chars)).replace(
+        "{min}", str(MIN_THINKING_CHARS)
     )
 
 

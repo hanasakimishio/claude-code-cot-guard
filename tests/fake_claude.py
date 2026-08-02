@@ -63,6 +63,12 @@ def main() -> int:
     if stat.S_IMODE(settings_path.stat().st_mode) != 0o600:
         return 10
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    expected_prompt = os.getenv("EXPECT_ZERO_PROMPT")
+    if (
+        expected_prompt
+        and settings["env"].get("COT_GUARD_ZERO_PROMPT") != expected_prompt
+    ):
+        return 13
     hook = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
     env = os.environ.copy()
     env.update(settings["env"])

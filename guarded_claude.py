@@ -133,6 +133,9 @@ def write_settings(path: Path, server: StateServer, options: argparse.Namespace)
             ]
         },
     }
+    for name in ("COT_GUARD_ZERO_PROMPT", "COT_GUARD_THIN_PROMPT"):
+        if name in os.environ:
+            settings["env"][name] = os.environ[name]
     path.write_text(json.dumps(settings), encoding="utf-8")
     path.chmod(0o600)
 

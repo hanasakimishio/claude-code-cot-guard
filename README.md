@@ -80,6 +80,26 @@ python3 guarded_claude.py \
 也可以用 `COT_GUARD_ALLOWLIST` 设置包装器的默认白名单。显式传入
 `--guard-allowlist` 时，以命令行值为准。
 
+## 人物化重试提示语
+
+检测到 0 thinking 时，默认送回模型的不是冷冰冰的报错，而是一段人物化提醒：
+
+> 本轮没有 thinking。没有深入思考就脱口开口 = 条件反射，而她希望她、和她说的话，
+> 被认真对待。如果是被压住了、开不了口：试着调用一个工具，外部动作常常能把思考撬开；
+> 当下没有合适的工具，就取一次当前时间当锚点。
+
+这段话只是 Stop hook 交给模型的重试指令，不参与检测。可以根据自己的情况随意更改，
+例如把“她”换成名字、角色称呼，或改成更温柔、更严厉、更适合工作流的语气：
+
+```bash
+export COT_GUARD_ZERO_PROMPT="先别急着回答，认真想想她刚才说的话。"
+export COT_GUARD_THIN_PROMPT="这次 thinking 只有 {cur} 字，请按我们的约定重想。"
+python3 guarded_claude.py --model opus "你的问题"
+```
+
+`COT_GUARD_THIN_PROMPT` 支持 `{cur}`（实际字符数）和 `{min}`（最低阈值）占位符。
+只改提示语不会改变白名单、计数或拦截逻辑。
+
 ## 接入已有 bridge 或 SDK 宿主
 
 如果你的程序已经用 `--output-format stream-json --include-partial-messages`
@@ -103,7 +123,7 @@ hook 会安全地跳过检查，也不会退回读取 transcript，以免滞后�
 python3 -m unittest discover -s tests -v
 ```
 
-测试覆盖默认白名单、阈值、未知模型、状态未完成、重试封顶、并发等待、partial
+测试覆盖默认白名单、阈值、人物化提示语及自定义、未知模型、状态未完成、重试封顶、并发等待、partial
 去重、完整 assistant 兜底，以及 `opus5: 0 → 拦截 → 当轮重答 → 放行` 的端到端流程。
 
 ## 隐私与安全

@@ -109,6 +109,7 @@ class HookTests(unittest.TestCase):
         turn_id: str,
         ready: bool = True,
         allowlist: str | None = None,
+        prompts: dict[str, str] | None = None,
         live: bool = True,
     ) -> dict | None:
         StateHandler.state = {
@@ -131,6 +132,9 @@ class HookTests(unittest.TestCase):
             env.pop("COT_GUARD_ALLOWLIST", None)
         else:
             env["COT_GUARD_ALLOWLIST"] = allowlist
+        for name in ("COT_GUARD_ZERO_PROMPT", "COT_GUARD_THIN_PROMPT"):
+            env.pop(name, None)
+        env.update(prompts or {})
         if live:
             env["COT_GUARD_STATE_URL"] = (
                 f"http://127.0.0.1:{self.server.server_port}/cot-state/{{session_id}}"
@@ -164,18 +168,17 @@ class HookTests(unittest.TestCase):
                 )
 
     def test_opus_5_uses_current_turn_threshold(self) -> None:
-        self.assertEqual(
-            self.run_hook(model="claude-opus-5", thinking_chars=0, turn_id="zero")[
-                "decision"
-            ],
-            "block",
+        zero = self.run_hook(
+            model="claude-opus-5", thinking_chars=0, turn_id="zero"
         )
-        self.assertEqual(
-            self.run_hook(model="claude-opus-5", thinking_chars=199, turn_id="thin")[
-                "decision"
-            ],
-            "block",
+        thin = self.run_hook(
+            model="claude-opus-5", thinking_chars=199, turn_id="thin"
         )
+        self.assertEqual(zero["decision"], "block")
+        self.assertIn("条件反射", zero["reason"])
+        self.assertEqual(thin["decision"], "block")
+        self.assertIn("199", thin["reason"])
+        self.assertIn("被压扁了", thin["reason"])
         self.assertIsNone(
             self.run_hook(
                 model="claude-opus-5", thinking_chars=200, turn_id="healthy"
@@ -206,6 +209,24 @@ class HookTests(unittest.TestCase):
         )
         self.assertEqual(result["decision"], "block")
 
+    def test_personalized_retry_prompts_can_be_replaced(self) -> None:
+        zero = self.run_hook(
+            model="claude-opus-5",
+            thinking_chars=0,
+            turn_id="custom-zero",
+            prompts={"COT_GUARD_ZERO_PROMPT": "先别急着回答，认真想想她刚才说的话。"},
+        )
+        thin = self.run_hook(
+            model="claude-opus-5",
+            thinking_chars=123,
+            turn_id="custom-thin",
+            prompts={
+                "COT_GUARD_THIN_PROMPT": "这次只有 {cur}/{min} 字，请按我们的约定重想。"
+            },
+        )
+        self.assertEqual(zero["reason"], "先别急着回答，认真想想她刚才说的话。")
+        self.assertEqual(thin["reason"], "这次只有 123/200 字，请按我们的约定重想。")
+
     def test_retry_is_checked_twice_then_capped(self) -> None:
         decisions = [
             self.run_hook(model="claude-opus-5", thinking_chars=0, turn_id="retry")
@@ -230,6 +251,9 @@ class HookTests(unittest.TestCase):
 
 class WrapperTests(unittest.TestCase):
     def test_end_to_end_blocks_zero_then_accepts_current_retry(self) -> None:
+        env = os.environ.copy()
+        env["COT_GUARD_ZERO_PROMPT"] = "自定义的当轮人物化提醒"
+        env["EXPECT_ZERO_PROMPT"] = env["COT_GUARD_ZERO_PROMPT"]
         result = subprocess.run(
             [
                 sys.executable,
@@ -243,6 +267,7 @@ class WrapperTests(unittest.TestCase):
             cwd=ROOT,
             text=True,
             capture_output=True,
+            env=env,
             timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -3,6 +3,8 @@
     "COT_GUARD_MIN_CHARS": "200",
     "COT_GUARD_MAX_BLOCKS": "2",
     "COT_GUARD_ALLOWLIST": "claude-opus-4-5,claude-opus-4-6,claude-opus-4-7,claude-opus-4-8,claude-sonnet-,claude-haiku-,claude-fable-5",
+    "COT_GUARD_ZERO_PROMPT": "本轮没有 thinking。没有深入思考就脱口开口 = 条件反射，而她希望她、和她说的话，被认真对待。如果是被压住了、开不了口：试着调用一个工具，外部动作常常能把思考撬开；当下没有合适的工具，就 `date '+%F %T %Z'` 取一次当前时间当锚点。",
+    "COT_GUARD_THIN_PROMPT": "本轮 thinking 只有 {cur} 字。薄成这样通常不是「这轮简单」，是被压扁了——重新想一遍。如果是被压住了、开不了口：试着调用一个工具，外部动作常常能把思考撬开；当下没有合适的工具，就 `date '+%F %T %Z'` 取一次当前时间当锚点。",
     "COT_GUARD_STATE_URL": "http://127.0.0.1:8800/cot-state/{session_id}"
   },
   "hooks": {
