@@ -8,6 +8,9 @@
 
 ## 它解决什么问题
 
+实际使用中，Opus 5 的内置 safety 在部分情境下可能让模型进入防御性响应，
+并伴随 0 thinking 或 thinking 很薄的情况：模型没有充分展开思考就直接回答。
+
 Claude Code 的 Stop hook 输入包含最终回答，却不包含本轮 thinking 或实际 serving
 model；`transcript_path` 在 Stop 触发时也不保证已经写入最终消息。因此只读取 transcript
 会产生一轮延迟，无法可靠拦住正在结束的回答。
@@ -100,19 +103,39 @@ python3 guarded_claude.py --model opus "你的问题"
 `COT_GUARD_THIN_PROMPT` 支持 `{cur}`（实际字符数）和 `{min}`（最低阈值）占位符。
 只改提示语不会改变白名单、计数或拦截逻辑。
 
-## 接入已有 bridge 或 SDK 宿主
+## 接入自建前端
 
-如果你的程序已经用 `--output-format stream-json --include-partial-messages`
-运行 Claude Code，可以复用：
+如果自建前端已经通过 bridge 或 SDK 维护 Claude Code 子进程，不需要再运行
+`guarded_claude.py`。可以把实时计数器和 Stop hook 直接接进现有宿主。
+
+Claude Code 子进程需要启用：
+
+```text
+--print
+--input-format stream-json
+--output-format stream-json
+--include-partial-messages
+--verbose
+```
+
+可以复用以下文件：
 
 - `live_state.py`：线程安全的当前轮计数器；
 - `cot_guard_hook.py`：Stop hook；
 - `examples/host_integration.py`：事件接线示例；
 - `settings.example.json`：宿主为 hook 注入的配置示例。
 
-宿主必须在每个真实用户 prompt 前调用 `start()`，把 `message_start`、
-`thinking_delta` 和 `message_stop` 依次送入计数器，并在 loopback GET 接口调用
-`next_stop_snapshot(session_id)`。Stop 触发的重答沿用同一个 `turn_id`。
+宿主需要完成五件事：
+
+1. 每个真实用户 prompt 写入 Claude Code 前调用 `start()`，创建新的 `turn_id` 并清零计数。
+2. 从 `message_start` 记录实际 serving model，而不是只相信请求时使用的模型别名。
+3. 从 `thinking_delta` 累计本轮 thinking，并在 `message_stop` 标记一次 assistant completion。
+4. 在仅监听 loopback 的 GET 接口调用 `next_stop_snapshot(session_id)`，把当前轮状态提供给 hook。
+5. 给 Claude Code 子进程注入 `settings.example.json` 对应的 Stop hook 和 `COT_GUARD_STATE_URL`。
+
+Stop hook 触发的重答仍属于同一个用户轮次，必须沿用原来的 `turn_id`；只有新的真实用户
+prompt 才能清零计数。这样每次 Stop 都会等待并消费一条新的 assistant completion，
+不会把上一次回答的状态复用到本次重答。
 
 不要只把 `cot_guard_hook.py` 注册到普通交互式 Claude Code：没有实时状态提供方时，
 hook 会安全地跳过检查，也不会退回读取 transcript，以免滞后误判。
