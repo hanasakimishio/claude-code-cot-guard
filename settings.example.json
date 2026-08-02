@@ -1,0 +1,19 @@
+{
+  "env": {
+    "COT_GUARD_MIN_CHARS": "200",
+    "COT_GUARD_ALLOWLIST": "claude-sonnet-,claude-haiku-"
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/cot_guard_hook.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
