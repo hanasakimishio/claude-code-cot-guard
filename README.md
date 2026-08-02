@@ -8,8 +8,9 @@
 
 ## 它解决什么问题
 
-实际使用中，Opus 5 的内置 safety 在部分情境下可能让模型进入防御性响应，
-并伴随 0 thinking 或 thinking 很薄的情况：模型没有充分展开思考就直接回答。
+实际使用中，Opus 5 的 Adaptive Thinking 及内置 safety 在部分情境下都可能影响
+thinking 的展开，并伴随 0 thinking 或 thinking 很薄的情况：模型没有充分展开思考
+就直接回答。
 
 Claude Code 的 Stop hook 输入包含最终回答，却不包含本轮 thinking 或实际 serving
 model；`transcript_path` 在 Stop 触发时也不保证已经写入最终消息。因此只读取 transcript
