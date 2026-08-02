@@ -11,40 +11,71 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "cot_guard_hook.py"
+WRAPPER = ROOT / "guarded_claude.py"
+FAKE_CLAUDE = ROOT / "tests" / "fake_claude.py"
 sys.path.insert(0, str(ROOT))
 
+from cot_guard_hook import DEFAULT_ALLOW_PREFIXES  # noqa: E402
 from live_state import LiveCotState  # noqa: E402
 
 
 class LiveCotStateTests(unittest.TestCase):
-    def test_deltas_are_not_double_counted_by_full_blocks(self) -> None:
+    def test_stream_completion_is_consumed_exactly_once(self) -> None:
         state = LiveCotState()
         state.start()
-        state.observe_model("claude-opus-example")
+        state.begin_assistant("claude-opus-5")
         state.observe_thinking("x" * 200)
+        state.complete_assistant()
+
+        first = state.next_stop_snapshot("session", timeout=0.01)
+        self.assertTrue(first["ready"])
+        self.assertEqual(first["thinking_chars"], 200)
+
         state.observe_assistant(
-            "claude-opus-example",
+            "claude-opus-5",
             [{"type": "thinking", "thinking": "duplicate" * 100}],
         )
-        self.assertEqual(state.thinking_chars, 200)
-        self.assertEqual(state.serving_model, "claude-opus-example")
+        duplicate = state.next_stop_snapshot("session", timeout=0.01)
+        self.assertFalse(duplicate["ready"])
+        self.assertEqual(duplicate["thinking_chars"], 200)
 
-    def test_full_blocks_are_used_when_deltas_are_missing(self) -> None:
+    def test_full_assistant_is_a_fallback_when_deltas_are_missing(self) -> None:
         state = LiveCotState()
         state.start()
         state.observe_assistant(
-            "claude-opus-example",
+            "claude-opus-5",
             [{"type": "thinking", "thinking": "x" * 250}],
         )
-        self.assertEqual(state.thinking_chars, 250)
-        state.finish()
-        self.assertFalse(state.active)
+        snapshot = state.next_stop_snapshot("session", timeout=0.01)
+        self.assertTrue(snapshot["ready"])
+        self.assertEqual(snapshot["thinking_chars"], 250)
+
+    def test_retry_waits_for_a_new_assistant_completion(self) -> None:
+        state = LiveCotState()
+        state.start()
+        state.begin_assistant("claude-opus-5")
+        state.complete_assistant()
+        state.next_stop_snapshot("session", timeout=0.01)
+
+        result = {}
+
+        def wait_for_retry() -> None:
+            result.update(state.next_stop_snapshot("session", timeout=1))
+
+        thread = threading.Thread(target=wait_for_retry)
+        thread.start()
+        state.begin_assistant("claude-opus-5")
+        state.observe_thinking("x" * 220)
+        state.complete_assistant()
+        thread.join(timeout=2)
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["thinking_chars"], 220)
 
 
 class StateHandler(BaseHTTPRequestHandler):
     state = {}
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self) -> None:  # noqa: N802
         body = json.dumps(type(self).state).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -52,7 +83,7 @@ class StateHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, *_):
+    def log_message(self, *_: object) -> None:
         pass
 
 
@@ -76,39 +107,44 @@ class HookTests(unittest.TestCase):
         model: str,
         thinking_chars: int,
         turn_id: str,
+        ready: bool = True,
+        allowlist: str | None = None,
         live: bool = True,
-    ):
+    ) -> dict | None:
         StateHandler.state = {
             "session_id": self.session_id,
             "turn_id": turn_id,
             "serving_model": model,
             "thinking_chars": thinking_chars,
             "active": True,
+            "ready": ready,
         }
         env = os.environ.copy()
         env.update(
             {
-                "HOME": self.tempdir.name,
                 "COT_GUARD_CACHE_DIR": str(Path(self.tempdir.name) / "cache"),
                 "COT_GUARD_MIN_CHARS": "200",
                 "COT_GUARD_MAX_BLOCKS": "2",
-                "COT_GUARD_ALLOWLIST": "claude-fast-",
             }
         )
+        if allowlist is None:
+            env.pop("COT_GUARD_ALLOWLIST", None)
+        else:
+            env["COT_GUARD_ALLOWLIST"] = allowlist
         if live:
             env["COT_GUARD_STATE_URL"] = (
                 f"http://127.0.0.1:{self.server.server_port}/cot-state/{{session_id}}"
             )
         else:
             env.pop("COT_GUARD_STATE_URL", None)
-        payload = {
-            "session_id": self.session_id,
-            "transcript_path": str(Path(self.tempdir.name) / "missing.jsonl"),
-            "stop_hook_active": False,
-        }
         result = subprocess.run(
             [sys.executable, str(HOOK)],
-            input=json.dumps(payload),
+            input=json.dumps(
+                {
+                    "session_id": self.session_id,
+                    "transcript_path": str(Path(self.tempdir.name) / "ignored.jsonl"),
+                }
+            ),
             text=True,
             capture_output=True,
             env=env,
@@ -116,87 +152,111 @@ class HookTests(unittest.TestCase):
         )
         return json.loads(result.stdout) if result.stdout else None
 
-    def test_live_threshold_allowlist_and_unknown_model(self) -> None:
+    def test_default_allowlist(self) -> None:
+        for index, prefix in enumerate(DEFAULT_ALLOW_PREFIXES):
+            with self.subTest(prefix=prefix):
+                self.assertIsNone(
+                    self.run_hook(
+                        model=f"{prefix}-example",
+                        thinking_chars=0,
+                        turn_id=f"allow-{index}",
+                    )
+                )
+
+    def test_opus_5_uses_current_turn_threshold(self) -> None:
         self.assertEqual(
-            self.run_hook(
-                model="claude-opus-example", thinking_chars=0, turn_id="zero"
-            )["decision"],
+            self.run_hook(model="claude-opus-5", thinking_chars=0, turn_id="zero")[
+                "decision"
+            ],
             "block",
         )
         self.assertEqual(
-            self.run_hook(
-                model="claude-opus-example", thinking_chars=199, turn_id="thin"
-            )["decision"],
+            self.run_hook(model="claude-opus-5", thinking_chars=199, turn_id="thin")[
+                "decision"
+            ],
             "block",
         )
         self.assertIsNone(
             self.run_hook(
-                model="claude-opus-example", thinking_chars=200, turn_id="healthy"
+                model="claude-opus-5", thinking_chars=200, turn_id="healthy"
             )
         )
-        self.assertIsNone(
-            self.run_hook(model="claude-fast-v1", thinking_chars=0, turn_id="fast")
-        )
+
+    def test_unknown_or_incomplete_state_is_blocked(self) -> None:
         self.assertEqual(
             self.run_hook(model="", thinking_chars=0, turn_id="unknown")["decision"],
             "block",
         )
+        self.assertEqual(
+            self.run_hook(
+                model="claude-opus-5",
+                thinking_chars=300,
+                turn_id="incomplete",
+                ready=False,
+            )["decision"],
+            "block",
+        )
+
+    def test_allowlist_can_be_replaced_with_an_empty_list(self) -> None:
+        result = self.run_hook(
+            model="claude-sonnet-example",
+            thinking_chars=0,
+            turn_id="empty-list",
+            allowlist="",
+        )
+        self.assertEqual(result["decision"], "block")
 
     def test_retry_is_checked_twice_then_capped(self) -> None:
-        first = self.run_hook(
-            model="claude-opus-example", thinking_chars=0, turn_id="retry"
-        )
-        second = self.run_hook(
-            model="claude-opus-example", thinking_chars=0, turn_id="retry"
-        )
-        third = self.run_hook(
-            model="claude-opus-example", thinking_chars=0, turn_id="retry"
-        )
-        self.assertEqual(first["decision"], "block")
-        self.assertEqual(second["decision"], "block")
-        self.assertIsNone(third)
-
-    def test_transcript_fallback_checks_completed_turns(self) -> None:
-        transcript = Path(self.tempdir.name) / "session.jsonl"
-        rows = [
-            {
-                "type": "user",
-                "uuid": "user-turn-1",
-                "message": {"content": "question"},
-            },
-            {
-                "type": "assistant",
-                "message": {
-                    "model": "claude-opus-example",
-                    "content": [{"type": "text", "text": "answer"}],
-                },
-            },
+        decisions = [
+            self.run_hook(model="claude-opus-5", thinking_chars=0, turn_id="retry")
+            for _ in range(3)
         ]
-        transcript.write_text(
-            "\n".join(json.dumps(row) for row in rows) + "\n",
-            encoding="utf-8",
+        self.assertEqual(decisions[0]["decision"], "block")
+        self.assertEqual(decisions[1]["decision"], "block")
+        self.assertIsNone(decisions[2])
+
+    def test_transcript_is_never_used_as_a_delayed_fallback(self) -> None:
+        transcript = Path(self.tempdir.name) / "ignored.jsonl"
+        transcript.write_text("private transcript content", encoding="utf-8")
+        self.assertIsNone(
+            self.run_hook(
+                model="claude-opus-5",
+                thinking_chars=0,
+                turn_id="no-live-state",
+                live=False,
+            )
         )
-        env = os.environ.copy()
-        env.update(
-            {
-                "HOME": self.tempdir.name,
-                "COT_GUARD_CACHE_DIR": str(Path(self.tempdir.name) / "cache"),
-                "COT_GUARD_MIN_CHARS": "200",
-                "COT_GUARD_ALLOWLIST": "",
-            }
-        )
-        env.pop("COT_GUARD_STATE_URL", None)
+
+
+class WrapperTests(unittest.TestCase):
+    def test_end_to_end_blocks_zero_then_accepts_current_retry(self) -> None:
         result = subprocess.run(
-            [sys.executable, str(HOOK)],
-            input=json.dumps(
-                {"session_id": self.session_id, "transcript_path": str(transcript)}
-            ),
+            [
+                sys.executable,
+                str(WRAPPER),
+                "--guard-claude-bin",
+                str(FAKE_CLAUDE),
+                "--model",
+                "claude-opus-5",
+                "test prompt",
+            ],
+            cwd=ROOT,
             text=True,
             capture_output=True,
-            env=env,
-            check=True,
+            timeout=10,
         )
-        self.assertEqual(json.loads(result.stdout)["decision"], "block")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "first answersecond answer")
+
+    def test_stream_flags_are_owned_by_the_wrapper(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(WRAPPER), "--print", "test prompt"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("managed by the guard", result.stderr)
 
 
 if __name__ == "__main__":

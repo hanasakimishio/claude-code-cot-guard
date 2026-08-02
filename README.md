@@ -1,138 +1,101 @@
 # Claude Code COT Guard
 
-A dependency-free Stop hook that catches zero or unusually thin `thinking`
-before Claude Code finishes a turn.
+一个用于 Claude Code 的当前轮次 thinking 检查器。非白名单模型在结束回答前，
+如果本轮可见 thinking 少于指定字符数，Stop hook 会阻止结束并要求重新思考。
 
-> 非 Anthropic 官方项目。COT 字符数只是工程启发式指标，不等于回答质量。
+> 非 Anthropic 官方项目。thinking 字符数是工程启发式指标，不代表回答质量，
+> 也不读取模型未输出的内部推理。
 
-## 为什么需要它
+## 它解决什么问题
 
-Claude Code 的 Stop hook 能阻止本轮结束，并把原因作为下一条指令交还给 Claude；
-但 Stop 输入只直接提供最终文本，不提供本轮 `thinking` 或实际 serving model。
-而且官方文档明确说明：Stop 触发时，`transcript_path` 不保证已经包含最终消息。
+Claude Code 的 Stop hook 输入包含最终回答，却不包含本轮 thinking 或实际 serving
+model；`transcript_path` 在 Stop 触发时也不保证已经写入最终消息。因此只读取 transcript
+会产生一轮延迟，无法可靠拦住正在结束的回答。
 
-因此本项目提供两种模式：
+本项目附带 `guarded_claude.py`：它以 `stream-json` 运行 Claude Code，实时记录当前
+assistant response 的实际模型和 `thinking_delta`，再通过仅监听 loopback 的临时状态服务
+交给 Stop hook 判断。每次 Stop 必须消费一个新的 assistant completion，不会复用上一条回答。
 
-| 模式 | 安装难度 | 能力 |
-| --- | --- | --- |
-| Transcript fallback | 低 | 补查已经落盘的完整轮次，可能晚一轮 |
-| Live-state mode | 中 | 宿主从 `stream-json` 实时计数，Stop 当轮立即判断 |
+- [Claude Code Hooks reference](https://code.claude.com/docs/en/hooks#stop)
+- [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
 
-相关官方文档：
+## 直接使用
 
-- [Hooks reference: Stop input and decision control](https://code.claude.com/docs/en/hooks#stop)
-- [CLI reference: `--include-partial-messages`](https://code.claude.com/docs/en/cli-reference)
-
-## 特性
-
-- 低于阈值时返回 `{"decision":"block","reason":"..."}`
-- 模型前缀白名单，由使用者显式配置
-- 未知模型默认 fail-closed
-- 同一轮最多拦截两次，避免无限循环
-- 实时接口只接受 `127.0.0.1` 或 `::1`
-- 不记录 prompt、回答正文或 thinking 内容，只记录模型名、字数和判定结果
-- Python 标准库实现，无第三方依赖
-
-## 快速安装：Transcript fallback
-
-要求：Python 3.10+，macOS 或 Linux。
+要求：Python 3.10+、已安装 Claude Code，macOS 或 Linux。
 
 ```bash
 git clone https://github.com/hanasakimishio/claude-code-cot-guard.git
 cd claude-code-cot-guard
-mkdir -p ~/.claude/hooks
-install -m 0755 cot_guard_hook.py ~/.claude/hooks/cot_guard_hook.py
+python3 guarded_claude.py --model opus "检查这个项目并给出改进建议"
 ```
 
-把 `settings.example.json` 中的 `env` 和 `hooks.Stop` 合并进
-`~/.claude/settings.json`。不要直接覆盖已有设置。
-
-最小配置：
-
-```json
-{
-  "env": {
-    "COT_GUARD_MIN_CHARS": "200",
-    "COT_GUARD_ALLOWLIST": "claude-sonnet-,claude-haiku-"
-  },
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$HOME/.claude/hooks/cot_guard_hook.py\"",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-重启 Claude Code 后生效。Transcript fallback 会读取本机
-`transcript_path`，但不会把内容发送到网络。
-
-## 配置项
-
-| 环境变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `COT_GUARD_MIN_CHARS` | `200` | 最低 thinking 字符数 |
-| `COT_GUARD_ALLOWLIST` | 空 | 逗号分隔的模型前缀；命中即放行 |
-| `COT_GUARD_MAX_BLOCKS` | `2` | 同一轮最大拦截次数 |
-| `COT_GUARD_CACHE_DIR` | `~/.claude/cache` | ledger 与本地日志目录 |
-| `COT_GUARD_STATE_URL` | 空 | 实时状态 URL 模板，必须是 loopback HTTP |
-
-白名单按前缀匹配。例如：
+所有未以 `--guard-` 开头的参数都会传给 Claude Code，例如：
 
 ```bash
-export COT_GUARD_ALLOWLIST="claude-sonnet-,claude-haiku-"
+python3 guarded_claude.py --permission-mode plan --model opus "分析当前目录"
 ```
 
-留空表示所有模型都接受阈值检测。
+包装器使用 Claude Code 的 one-shot print 模式，不是全屏交互式 TUI。它不会修改
+`~/.claude/settings.json`：Stop hook 配置写入权限为 `0600` 的临时文件，进程退出后删除。
 
-## 当轮实时模式
+## 默认效果
 
-如果你通过 SDK、bridge 或自己的常驻进程运行 Claude Code，可以启用：
+无需修改配置即可使用。以下模型前缀命中白名单，thinking 为 0 也直接放行：
 
 ```text
---print
---output-format stream-json
---input-format stream-json
---verbose
---include-partial-messages
+claude-opus-4-5
+claude-opus-4-6
+claude-opus-4-7
+claude-opus-4-8
+claude-sonnet-
+claude-haiku-
+claude-fable-5
 ```
 
-宿主需要完成四件事：
+其余模型和未知模型均检查当前轮次；默认少于 200 个 thinking 字符就拦截。
+因此实际 serving model 为 `claude-opus-5...` 时，0 COT 会在当轮被抓住。
+同一用户轮次最多拦截两次，之后放行，避免无限重试。
 
-1. 每次写入真实用户 prompt 前调用 `LiveCotState.start()`。
-2. 从 `message_start` 记录实际 serving model。
-3. 从 `thinking_delta` 累计字符数；没有 partial 时用完整 assistant block 兜底。
-4. 在 loopback GET 接口返回 `snapshot(session_id)`。
+## 配置
 
-返回协议：
+包装器参数：
 
-```json
-{
-  "session_id": "current-session-id",
-  "turn_id": "host-generated-turn-id",
-  "serving_model": "actual-serving-model",
-  "thinking_chars": 237,
-  "active": true
-}
-```
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--guard-min-thinking` | `200` | 非白名单模型最低 thinking 字符数 |
+| `--guard-max-blocks` | `2` | 同一用户轮次最大拦截次数 |
+| `--guard-allowlist` | 上述列表 | 逗号分隔的模型前缀；传空字符串可关闭白名单 |
+| `--guard-claude-bin` | `claude` | Claude Code 可执行文件 |
+| `--guard-raw-stream` | 关闭 | 原样输出 stream-json，便于调试 |
 
-然后让 Claude Code 子进程继承：
+示例：
 
 ```bash
-export COT_GUARD_STATE_URL="http://127.0.0.1:8800/cot-state/{session_id}"
+python3 guarded_claude.py \
+  --guard-min-thinking 300 \
+  --guard-allowlist "claude-sonnet-,claude-haiku-" \
+  --model opus "分析当前目录"
 ```
 
-参考实现见 `live_state.py` 和 `examples/host_integration.py`。
+也可以用 `COT_GUARD_ALLOWLIST` 设置包装器的默认白名单。显式传入
+`--guard-allowlist` 时，以命令行值为准。
 
-`turn_id` 只在真实用户 prompt 到来时更新。Stop hook 触发的续写必须沿用同一个
-`turn_id`，这样第二次 Stop 才会重新检查累计后的 thinking。
+## 接入已有 bridge 或 SDK 宿主
+
+如果你的程序已经用 `--output-format stream-json --include-partial-messages`
+运行 Claude Code，可以复用：
+
+- `live_state.py`：线程安全的当前轮计数器；
+- `cot_guard_hook.py`：Stop hook；
+- `examples/host_integration.py`：事件接线示例；
+- `settings.example.json`：宿主为 hook 注入的配置示例。
+
+宿主必须在每个真实用户 prompt 前调用 `start()`，把 `message_start`、
+`thinking_delta` 和 `message_stop` 依次送入计数器，并在 loopback GET 接口调用
+`next_stop_snapshot(session_id)`。Stop 触发的重答沿用同一个 `turn_id`。
+
+不要只把 `cot_guard_hook.py` 注册到普通交互式 Claude Code：没有实时状态提供方时，
+hook 会安全地跳过检查，也不会退回读取 transcript，以免滞后误判。
 
 ## 测试
 
@@ -140,15 +103,15 @@ export COT_GUARD_STATE_URL="http://127.0.0.1:8800/cot-state/{session_id}"
 python3 -m unittest discover -s tests -v
 ```
 
-覆盖：阈值、白名单、未知模型、重试封顶、partial 去重、完整 block 兜底和
-transcript fallback。
+测试覆盖默认白名单、阈值、未知模型、状态未完成、重试封顶、并发等待、partial
+去重、完整 assistant 兜底，以及 `opus5: 0 → 拦截 → 当轮重答 → 放行` 的端到端流程。
 
 ## 隐私与安全
 
-- hook 代码会以你的本机权限执行，请在安装前审阅源码。
-- 实时状态 URL 拒绝非 loopback 地址，避免把 session 元数据发送到远端。
-- 日志位于 `~/.claude/cache/cot-guard.log`，不包含 prompt、回答或 thinking 正文。
-- `last_assistant_message` 不会被保存或传输。
+- 状态服务仅监听 `127.0.0.1`，URL 含每次随机生成的不可猜测路径。
+- hook 拒绝访问非 loopback 状态地址，也禁用系统 HTTP 代理。
+- 不记录 prompt、回答正文或 thinking 内容；日志只含模型名、字数和判定结果。
+- 临时 settings、状态 ledger 和日志随包装器退出一并删除。
 
 ## License
 
