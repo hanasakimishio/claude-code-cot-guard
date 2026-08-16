@@ -159,4 +159,4 @@ python3 -m unittest discover -s tests -v
 
 ## License
 
-[MIT](LICENSE)
+[AGPL-3.0](LICENSE)
